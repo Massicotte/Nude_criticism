@@ -109,6 +109,7 @@ class App:
             "biberon": True, "halo": True, "jauge": True,
         }
         self.nsfw_score = 0.0
+        self.nsfw_error = None
         self.last_nsfw = 0.0
         self.yolo = None
         self.yolo_dets = []
@@ -124,12 +125,15 @@ class App:
 
     def get_yolo(self):
         if self.yolo is None and YOLO_OK:
+            self.gui.set_module_status("yolo", "CHARGEMENT du modele (telechargement possible)...")
             try:
                 model = YOLOWorld("yolov8s-worldv2")
                 model.set_classes(["cow", "udder", "baby bottle"])
                 self.yolo = model
-            except Exception:
+                self.gui.set_module_status("yolo", "OK")
+            except Exception as exc:
                 self.yolo = False
+                self.gui.set_module_status("yolo", f"ERREUR : {exc}")
         return self.yolo or None
 
     def get_hands(self):
@@ -137,8 +141,10 @@ class App:
             try:
                 self.hands = mp.solutions.hands.Hands(
                     max_num_hands=2, min_detection_confidence=0.6)
-            except Exception:
+                self.gui.set_module_status("hands", "OK")
+            except Exception as exc:
                 self.hands = False
+                self.gui.set_module_status("hands", f"ERREUR : {exc}")
         return self.hands or None
 
     # ---- features ----
@@ -147,11 +153,16 @@ class App:
         if now - self.last_nsfw < NSFW_INTERVAL:
             return
         self.last_nsfw = now
+        if not NSFW_OK:
+            return
         try:
             img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             self.nsfw_score = float(opennsfw2.predict_image(img))
-        except Exception:
+            self.nsfw_error = None
+        except Exception as exc:
+            self.nsfw_error = str(exc)
             self.nsfw_score = 0.0
+            self.gui.set_module_status("nsfw", f"ERREUR : {exc}")
 
     def run_yolo(self, frame, now):
         if now - self.last_yolo < YOLO_INTERVAL:
@@ -315,14 +326,22 @@ class Gui:
         tk.Label(self.root, text="OFFICE DE SURVEILLANCE - ARCHIDIOCESE TECHNOLOGIQUE",
                  bg=BG, fg="#c09090", font=("Times", 9)).pack()
 
-        status = []
-        status.append("OpenNSFW : " + ("PRESENT" if NSFW_OK else "absent (pip install opennsfw2)"))
-        status.append("YOLO-World : " + ("PRESENT" if YOLO_OK else "absent (pip install ultralytics)"))
-        status.append("MediaPipe : " + ("PRESENT" if MP_OK else "absent (pip install mediapipe)"))
-        status.append("Audio : " + ("PRESENT" if PYGAME_OK else "absent (pip install pygame)"))
-        tk.Label(self.root, text="\n".join(status), bg="#12041f", fg="#e8d8b0",
-                 font=("Courier", 8), justify=tk.LEFT, anchor="w",
-                 wraplength=420).pack(fill=tk.X, padx=10, pady=6)
+        self.module_status = {
+            "nsfw": "OK" if NSFW_OK else "absent (pip install opennsfw2)",
+            "yolo": "OK" if YOLO_OK else "absent (pip install ultralytics)",
+            "hands": "OK" if MP_OK else "absent (pip install mediapipe)",
+            "audio": "OK" if PYGAME_OK else "absent (bip systeme)",
+        }
+        self.status_frame = tk.Frame(self.root, bg="#12041f", relief="sunken")
+        self.status_frame.pack(fill=tk.X, padx=10, pady=6)
+        self.status_labels = {}
+        for key, txt in self.module_status.items():
+            name = {"nsfw": "OpenNSFW", "yolo": "YOLO-World", "hands": "MediaPipe", "audio": "Audio"}[key]
+            lbl = tk.Label(self.status_frame, text=f"{name:<11}: {txt}", bg="#12041f",
+                           fg="#00ff9d" if txt == "OK" else "#e8a0a0",
+                           font=("Courier", 8), anchor="w", justify=tk.LEFT, wraplength=420)
+            lbl.pack(fill=tk.X, padx=6, pady=1)
+            self.status_labels[key] = lbl
 
         tk.Label(self.root, text="MIRACLES ACTIVABLES :", bg=BG, fg="#d4af37",
                  font=("Times", 11, "bold")).pack(anchor="w", padx=12)
@@ -362,6 +381,13 @@ class Gui:
 
     def toggle(self, key):
         self.app.features[key] = self.vars[key].get()
+
+    def set_module_status(self, key, txt):
+        self.module_status[key] = txt
+        if key in self.status_labels:
+            self.status_labels[key].config(
+                text=f"{ {'nsfw': 'OpenNSFW', 'yolo': 'YOLO-World', 'hands': 'MediaPipe', 'audio': 'Audio'}[key]:<11}: {txt}",
+                fg="#00ff9d" if txt == "OK" else "#e8a0a0")
 
 
 if __name__ == "__main__":
