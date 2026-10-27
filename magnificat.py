@@ -18,6 +18,8 @@ import cv2
 import numpy as np
 import tkinter as tk
 
+TMP_DIR = tempfile.gettempdir()
+
 try:
     import opennsfw2
     NSFW_OK = True
@@ -64,7 +66,6 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 NSFW_INTERVAL = 2.0
 YOLO_INTERVAL = 1.5
 HALLELUJAH_COOLDOWN = 6.0
-TMP_DIR = tempfile.gettempdir()
 CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
 
