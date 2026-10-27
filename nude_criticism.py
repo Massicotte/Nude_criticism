@@ -1,10 +1,12 @@
 """NUDE CRITICISM - Critique nue du flux video en direct.
 
 Webcam -> NudeNet en temps reel -> affichage de TOUTES les informations
-detectees (labels, scores, boites, segmentation) sur le flux, plus un
-pupitre technique listant l'etat du detecteur.
+detectees (labels, scores, boites) sur le flux, plus un pupitre technique
+listant l'etat du detecteur et la sortie brute.
 """
 
+import os
+import tempfile
 import time
 
 import cv2
@@ -39,6 +41,7 @@ BOX_COLORS = {
     "BELLY_COVERED": (128, 0, 128),
 }
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+TMP_DIR = tempfile.gettempdir()
 
 
 def draw_text_bg(frame, text, org, scale, color, thickness=1):
@@ -48,37 +51,75 @@ def draw_text_bg(frame, text, org, scale, color, thickness=1):
     cv2.putText(frame, text, (x, y), FONT, scale, color, thickness)
 
 
+def normalize_detections(res):
+    """Normalise la sortie NudeNet (versions 2.x et 3.x) en liste de dicts
+    avec les cles : label, score, box(x, y, w, h)."""
+    if not isinstance(res, list):
+        res = [res]
+    out = []
+    for det in res:
+        if not isinstance(det, dict):
+            continue
+        label = det.get("class") or det.get("label") or "?"
+        score = float(det.get("score") or det.get("confidence") or 0.0)
+        box = det.get("box")
+        if box is None or len(box) < 4:
+            continue
+        out.append({"label": label, "score": score, "box": list(box[:4]), "raw": det})
+    return out
+
+
 class App:
     def __init__(self):
         self.cap = cv2.VideoCapture(0)
         self.window = "NUDE CRITICISM - Analyse en direct"
         cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.window, 960, 540)
-        self.detector = NudeDetector() if NN_OK else None
-        self.detections = []          # dernier resultat brut NudeNet
+        self.detector = None
+        self.detector_error = None
+        self.detections = []
+        self.raw_detections = []
         self.last_detect = 0.0
         self.detect_count = 0
         self.fps = 0.0
         self._prev = time.time()
         self.running = False
         self.gui = Gui(self)
+        if NN_OK:
+            self.gui.set_status("NudeNet : chargement du modele...")
+        else:
+            self.gui.set_status("NudeNet : NON INSTALLE (pip install nudenet)")
 
     # ---- analyse ----
 
+    def get_detector(self):
+        """Charge NudeDetector paresseusement (telechargement du modele au 1er appel)."""
+        if self.detector is None and self.detector_error is None:
+            if not NN_OK:
+                return None
+            try:
+                self.detector = NudeDetector()
+                self.gui.set_status("NudeNet : modele ACTIF")
+            except Exception as exc:
+                self.detector_error = str(exc)
+                self.gui.set_status(f"NudeNet : ERREUR - {exc}")
+        return self.detector
+
     def analyze(self, frame):
-        """Analyse NudeNet et retourne la liste brute des detections."""
-        if self.detector is None:
+        detector = self.get_detector()
+        if detector is None:
             return []
-        tmp_path = "/tmp/nc_frame.jpg"
-        cv2.imwrite(tmp_path, frame)
+        tmp_path = os.path.join(TMP_DIR, "nc_frame.jpg")
+        ok, buf = cv2.imencode(".jpg", frame)
+        if not ok:
+            return []
+        buf.tofile(tmp_path) if hasattr(buf, "tofile") else cv2.imwrite(tmp_path, frame)
         try:
-            res = self.detector.detect(tmp_path)
+            res = detector.detect(tmp_path)
         except Exception as exc:
-            self.gui.set_status(f"Erreur NudeNet : {exc}")
-            return self.detections
-        if isinstance(res, list) and res:
-            return res[0] if isinstance(res[0], list) else res
-        return []
+            self.gui.set_status(f"NudeNet : ERREUR - {exc}")
+            return []
+        return normalize_detections(res)
 
     # ---- boucle ----
 
@@ -98,15 +139,15 @@ class App:
             self.gui.refresh_detections()
 
         for det in self.detections:
-            label = det.get("class", det.get("label", "?"))
-            score = det.get("score", 0.0)
-            x, y, w, h = det["box"]
+            label, score, box = det["label"], det["score"], det["box"]
+            x, y, w, h = box
             color = BOX_COLORS.get(label, (200, 200, 200))
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-            draw_text_bg(frame, f"{label} {score:.0%}", (x, y - 8), 0.45, color, 1)
+            draw_text_bg(frame, f"{label} {score:.0%}", (x, max(20, y - 8)), 0.45, color, 1)
 
+        state = "OK" if self.detector else ("ERREUR" if self.detector_error else "CHARGEMENT")
         draw_text_bg(frame, f"{len(self.detections)} detections | analyse #{self.detect_count} "
-                           f"| {self.fps:.0f} fps | NudeNet: {'OK' if NN_OK else 'ABSENT'}",
+                           f"| {self.fps:.0f} fps | NudeNet: {state}",
                      (10, 26), 0.5, (0, 200, 255), 1)
         cv2.imshow(self.window, frame)
 
@@ -118,7 +159,7 @@ class App:
 
     def run(self):
         if not self.cap.isOpened():
-            tk.messagebox.showerror("Erreur", "Impossible d'acceder a la webcam.") if False else None
+            print("Erreur : impossible d'acceder a la webcam.")
             self.cap.release()
             return
         self.running = True
@@ -151,7 +192,7 @@ class Gui:
         tk.Label(self.root, text="OBSERVATION COMPORTEMENTALE EN TEMPS REEL - FLUX NON CONSERVE",
                  bg=BG, fg="#ffb000", font=("Courier", 8, "bold")).pack()
 
-        self.status_var = tk.StringVar(value="Detecteur NudeNet : " + ("ACTIF" if NN_OK else "NON INSTALLE (pip install nudenet)"))
+        self.status_var = tk.StringVar(value="Detecteur NudeNet : initialisation...")
         tk.Label(self.root, textvariable=self.status_var, bg="#0a0a2e", fg="#ffb000",
                  font=("Courier", 8), anchor="w", relief="sunken",
                  wraplength=490, justify=tk.LEFT).pack(fill=tk.X, padx=10, pady=6, ipady=3)
@@ -169,26 +210,25 @@ class Gui:
         self.output.delete("1.0", tk.END)
         dets = self.app.detections
         if not dets:
-            self.output.insert(tk.END, f"Analyse #{self.app.detect_count} : aucune detection.\n"
-                                       f"(NudeNet ne voit rien a critiquer... ou ne veut pas voir)")
+            state = "modele en chargement" if self.app.detector is None and not self.app.detector_error \
+                else "aucune detection (note : NudeNet detecte surtout les personnes/visages)"
+            self.output.insert(tk.END, f"Analyse #{self.app.detect_count} : {state}.\n")
         for i, det in enumerate(dets, 1):
-            label = det.get("class", det.get("label", "?"))
-            score = det.get("score", 0.0)
-            box = det.get("box", [0, 0, 0, 0])
+            box = det["box"]
             lines = [
                 f"--- detection {i} ---",
-                f"classe    : {label}",
-                f"score     : {score:.3f} ({score:.1%})",
+                f"classe    : {det['label']}",
+                f"score     : {det['score']:.3f} ({det['score']:.1%})",
                 f"boite     : x={box[0]} y={box[1]} w={box[2]} h={box[3]}",
             ]
-            for extra_key in sorted(det.keys()):
-                if extra_key not in ("class", "label", "score", "box"):
-                    lines.append(f"{extra_key:<9} : {det[extra_key]}")
+            for extra_key in sorted(det["raw"].keys()):
+                if extra_key not in ("class", "label", "score", "confidence", "box"):
+                    lines.append(f"{extra_key:<9} : {det['raw'][extra_key]}")
             self.output.insert(tk.END, "\n".join(lines) + "\n\n")
         self.output.config(state=tk.DISABLED)
 
     def set_status(self, msg):
-        self.status_var.set(msg)
+        self.status_var.set("Detecteur NudeNet : " + msg)
 
 
 if __name__ == "__main__":
