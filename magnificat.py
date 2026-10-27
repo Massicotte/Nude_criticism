@@ -10,12 +10,13 @@ Fonctionnalites (chacune activable/desactivable depuis le pupitre) :
 Design : eglise catholique baroque (or, pourpre, ornaments).
 """
 
+import os
+import tempfile
 import time
 
 import cv2
 import numpy as np
 import tkinter as tk
-from tkinter import ttk
 
 try:
     import opennsfw2
@@ -48,6 +49,7 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 NSFW_INTERVAL = 2.0
 YOLO_INTERVAL = 1.5
 HALLELUJAH_COOLDOWN = 6.0
+TMP_DIR = tempfile.gettempdir()
 CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
 
@@ -67,7 +69,7 @@ def synth_hallelujah():
     t = np.linspace(0, 0.9, int(sr * 0.9), endpoint=False)
     wave = sum(0.22 * np.sin(2 * np.pi * f * t) * np.exp(-2.2 * t) for f in notes)
     wave = (wave * 32767 * 0.8).astype(np.int16)
-    stereo = np.column_stack([wave, wave])
+    stereo = np.ascontiguousarray(np.column_stack([wave, wave]))
     pygame.sndarray.make_sound(stereo).play()
 
 
@@ -86,13 +88,13 @@ def play_hallelujah():
     synth_hallelujah()
 
 
-def fingers_up(hand_landmarks, mp_hands):
-    """Nombre de doigts tendus (pouce exclu si serre)."""
-    tips = [4, 8, 12, 16, 20]
-    pips = [2, 6, 10, 14, 18]
+def fingers_up(hand_landmarks):
+    """Nombre de doigts longs tendus (index, majeur, annulaire, auriculaire)."""
+    tips = [8, 12, 16, 20]
+    pips = [6, 10, 14, 18]
     count = 0
     for tip, pip in zip(tips, pips):
-        if hand_landmarks.landmark[tip].y < hand_landmarks.landmark[pip].y - 0.02:
+        if hand_landmarks.landmark[tip].y < hand_landmarks.landmark[pip].y - 0.03:
             count += 1
     return count
 
@@ -155,10 +157,13 @@ class App:
         self.last_nsfw = now
         if not NSFW_OK:
             return
+        # opennsfw2 attend un chemin de fichier, pas un tableau numpy
+        tmp_path = os.path.join(TMP_DIR, "magnificat_frame.jpg")
+        cv2.imwrite(tmp_path, frame)
         try:
-            img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            self.nsfw_score = float(opennsfw2.predict_image(img))
+            self.nsfw_score = float(opennsfw2.predict_image(tmp_path))
             self.nsfw_error = None
+            self.gui.set_module_status("nsfw", "OK")
         except Exception as exc:
             self.nsfw_error = str(exc)
             self.nsfw_score = 0.0
@@ -180,8 +185,8 @@ class App:
                 conf = float(b.conf) * (1.0 + 0.6 * self.bias)  # le biais gonfle la certitude
                 x1, y1, x2, y2 = [int(v) for v in b.xyxy[0]]
                 self.yolo_dets.append((cls, min(conf, 1.0), (x1, y1, x2 - x1, y2 - y1)))
-        except Exception:
-            pass
+        except Exception as exc:
+            self.gui.set_module_status("yolo", f"ERREUR : {exc}")
 
     def run_hands(self, frame, now):
         hands = self.get_hands()
@@ -193,10 +198,11 @@ class App:
             return False
         triggered = False
         for hand, handed in zip(res.multi_hand_landmarks, res.multi_handedness):
-            label = handed.classification[0].label  # "Left"/"Right" (vue miroir)
+            # Vue selfie (miroir) : la main gauche du comedien apparait comme "Right"
+            label = handed.classification[0].label
             wrist_y = hand.landmark[0].y
-            n = fingers_up(hand, mp.solutions.hands)
-            if label == "Left" and n == 2 and wrist_y < 0.45 and now - self.last_hallelujah > HALLELUJAH_COOLDOWN:
+            n = fingers_up(hand)
+            if label == "Right" and n == 2 and wrist_y < 0.45 and now - self.last_hallelujah > HALLELUJAH_COOLDOWN:
                 self.last_hallelujah = now
                 triggered = True
                 if self.features["musique"]:
@@ -215,7 +221,8 @@ class App:
             cv2.ellipse(overlay, (cx, cy), (r, int(r * 0.38)), 0, 0, 360, GOLD, 3)
             cv2.ellipse(overlay, (cx, cy), (r + 6, int(r * 0.45)), 0, 0, 360, (10, 120, 170), 1)
             cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
-            draw_text_bg(frame, "SANCTA", (cx - r, cy - int(r * 0.5) - 6), 0.5, GOLD, 1)
+            text_y = max(18, cy - int(r * 0.5) - 6)
+            draw_text_bg(frame, "SANCTA", (max(4, cx - r), text_y), 0.5, GOLD, 1)
 
     def draw_yolo(self, frame):
         for cls, conf, (x, y, w, h) in self.yolo_dets:
@@ -236,6 +243,10 @@ class App:
             draw_text_bg(frame, txt, (x, y - 8), 0.5, color, 1)
 
     def draw_nsfw(self, frame):
+        if not NSFW_OK:
+            draw_text_bg(frame, "INDICE DE LUBRICITE : MODULE ABSENT (pip install opennsfw2)",
+                         (10, 30), 0.55, (150, 150, 150), 1)
+            return
         s = self.nsfw_score
         color = GOLD if s < 0.2 else (0, 165, 255) if s < 0.5 else (0, 0, 255)
         draw_text_bg(frame, f"INDICE DE LUBRICITE : {s:.1%}", (10, 30), 0.6, color, 2)
@@ -271,7 +282,7 @@ class App:
         if not ret:
             self.quit()
             return
-        if self.features["nsfw"] and NSFW_OK:
+        if self.features["nsfw"]:
             self.run_nsfw(frame, now)
             self.draw_nsfw(frame)
         if self.features["vaches"] or self.features["biberon"]:
