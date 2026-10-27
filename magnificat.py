@@ -1,13 +1,14 @@
 """MAGNIFICAT - Sanctuaire de surveillance baroque (spectacle lacte/saint Francois).
 
-Fonctionnalites (chacune activable/desactivable depuis le pupitre) :
-- OpenNSFW : indice de lubricite en direct
-- YOLO-World : detection de vaches, pis et biberons (relique) + slider de biais
-- MediaPipe : hallelujah quand la main gauche est levee avec 2 doigts
-- Halo dore autour de la tete des comediens
-- Jauge laitiere
+Fonctionnalites (chacune activable/desactivable depuis la Sacristie) :
+- OpenNSFW : indice de lubricite en direct (via fichier temp, comme NudeNet)
+- YOLO-World : vaches, pis, biberons (relique) + slider de biais inquisitorial
+- MediaPipe (API solutions) : hallelujia si main gauche levee avec 2 doigts
+- Halo SANCTA autour des tetes
+- Jauge lactee
 
-Design : eglise catholique baroque (or, pourpre, ornaments).
+Chaque module est independant : s'il plante, les autres continuent.
+Design : eglise catholique baroque (or, pourpre).
 """
 
 import os
@@ -18,54 +19,50 @@ import cv2
 import numpy as np
 import tkinter as tk
 
-TMP_DIR = tempfile.gettempdir()
+# ------------------ imports optionnels ------------------
 
 try:
     import opennsfw2
     NSFW_OK = True
-except ImportError:
-    opennsfw2, NSFW_OK = None, False
+except Exception:
+    opennsfw2 = None
+    NSFW_OK = False
 
 try:
     from ultralytics import YOLOWorld
     YOLO_OK = True
-except ImportError:
-    YOLOWorld, YOLO_OK = None, False
+except Exception:
+    YOLOWorld = None
+    YOLO_OK = False
 
 try:
     import mediapipe as mp
-    from mediapipe.tasks import python as mp_python
-    from mediapipe.tasks.python import vision as mp_vision
-    MP_OK = True
-except ImportError:
-    mp, MP_OK = None, False
-
-HAND_LANDMARKER_URL = ("https://storage.googleapis.com/mediapipe-models/"
-                       "hand_landmarker/hand_landmarker/float16/1/"
-                       "hand_landmarker.task")
-HAND_MODEL_PATH = os.path.join(TMP_DIR, "hand_landmarker.task")
-
-
-def ensure_hand_model():
-    """Telecharge le modele hand_landmarker (nouvelle API Tasks) si absent."""
-    import urllib.request
-    if not os.path.exists(HAND_MODEL_PATH):
-        urllib.request.urlretrieve(HAND_LANDMARKER_URL, HAND_MODEL_PATH)
-    return HAND_MODEL_PATH
+    if not hasattr(mp, "solutions") or not hasattr(mp.solutions, "hands"):
+        mp = None
+        MP_OK = False
+    else:
+        MP_OK = True
+except Exception:
+    mp = None
+    MP_OK = False
 
 try:
     import pygame
     pygame.mixer.init()
     PYGAME_OK = True
 except Exception:
-    pygame, PYGAME_OK = None, False
+    pygame = None
+    PYGAME_OK = False
 
-GOLD = (30, 175, 235)          # BGR or
-PURPLE = (150, 20, 90)
-FONT = cv2.FONT_HERSHEY_SIMPLEX
+# ------------------ constantes ------------------
+
+GOLD = (30, 175, 235)          # BGR
 NSFW_INTERVAL = 2.0
 YOLO_INTERVAL = 1.5
 HALLELUJAH_COOLDOWN = 6.0
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+TMP_DIR = tempfile.gettempdir()
+NSFW_TMP = os.path.join(TMP_DIR, "magnificat_frame.jpg")
 CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
 
@@ -76,232 +73,238 @@ def draw_text_bg(frame, text, org, scale, color, thickness=1, bg=(0, 0, 0)):
     cv2.putText(frame, text, (x, y), FONT, scale, color, thickness)
 
 
-def synth_hallelujah():
-    """Accord majeur synthetise (fallback sans fichier mp3)."""
+def play_hallelujah():
     if not PYGAME_OK:
+        print("HALLELUJIA !")
         return
+    mp3 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "hallelujah.mp3")
+    try:
+        if os.path.exists(mp3):
+            pygame.mixer.music.load(mp3)
+            pygame.mixer.music.play()
+            return
+    except Exception:
+        pass
+    # accord de Do majeur synthetise
     sr = 44100
-    notes = [523.25, 659.25, 783.99, 1046.5]  # Do majeur ascendant (alleluia)
     t = np.linspace(0, 0.9, int(sr * 0.9), endpoint=False)
-    wave = sum(0.22 * np.sin(2 * np.pi * f * t) * np.exp(-2.2 * t) for f in notes)
+    wave = sum(0.22 * np.sin(2 * np.pi * f * t) * np.exp(-2.2 * t)
+               for f in (523.25, 659.25, 783.99, 1046.5))
     wave = (wave * 32767 * 0.8).astype(np.int16)
     stereo = np.ascontiguousarray(np.column_stack([wave, wave]))
     pygame.sndarray.make_sound(stereo).play()
 
 
-def play_hallelujah():
-    if not PYGAME_OK:
-        print("\a HALLELUJIA !")
-        return
-    try:
-        import os
-        if os.path.exists("assets/hallelujah.mp3"):
-            pygame.mixer.music.load("assets/hallelujah.mp3")
-            pygame.mixer.music.play()
-            return
-    except Exception:
-        pass
-    synth_hallelujah()
-
-
-def fingers_up_landmarks(landmarks):
-    """Nombre de doigts longs tendus (index, majeur, annulaire, auriculaire).
-    landmarks : liste de NormalizedLandmark (nouvelle API Tasks)."""
+def fingers_up(hand):
+    """Doigts longs tendus : pointe plus haute que l'articulation."""
     tips = [8, 12, 16, 20]
     pips = [6, 10, 14, 18]
-    count = 0
-    for tip, pip in zip(tips, pips):
-        if landmarks[tip].y < landmarks[pip].y - 0.03:
-            count += 1
-    return count
+    return sum(1 for tip, pip in zip(tips, pips)
+               if hand.landmark[tip].y < hand.landmark[pip].y - 0.03)
 
 
-class App:
+# ------------------ modules ------------------
+
+class NsfwModule:
+    """Indice de lubricite : frame -> fichier temp -> opennsfw2."""
+
     def __init__(self):
-        self.cap = cv2.VideoCapture(0)
-        self.window = "MAGNIFICAT - Sanctuaire de Surveillance"
-        cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.window, 960, 540)
+        self.score = 0.0
+        self.last = 0.0
+        self.error = None
+        self.active = NSFW_OK
 
-        self.features = {
-            "nsfw": True, "vaches": True, "musique": True,
-            "biberon": True, "halo": True, "jauge": True,
-        }
-        self.nsfw_score = 0.0
-        self.nsfw_error = None
-        self.last_nsfw = 0.0
-        self.yolo = None
-        self.yolo_dets = []
-        self.last_yolo = 0.0
-        self.bias = 0.0  # 0..1 : biais inquisitorial
-        self.hands = None
-        self.last_hallelujah = 0.0
-        self.milk = 0.0
-        self.running = False
-        self.gui = Gui(self)
-
-    # ---- modeles paresseux ----
-
-    def get_yolo(self):
-        if self.yolo is None and YOLO_OK:
-            self.gui.set_module_status("yolo", "CHARGEMENT du modele (telechargement possible)...")
-            try:
-                model = YOLOWorld("yolov8s-worldv2")
-                model.set_classes(["cow", "udder", "baby bottle"])
-                self.yolo = model
-                self.gui.set_module_status("yolo", "OK")
-            except Exception as exc:
-                self.yolo = False
-                self.gui.set_module_status("yolo", f"ERREUR : {exc}")
-        return self.yolo or None
-
-    def get_hands(self):
-        if self.hands is None and MP_OK:
-            self.gui.set_module_status("hands", "CHARGEMENT du modele...")
-            try:
-                model_path = ensure_hand_model()
-                opts = mp_python.BaseOptions(model_asset_path=model_path)
-                self.hands = mp_vision.HandLandmarker.create_from_options(
-                    mp_vision.HandLandmarkerOptions(
-                        base_options=opts,
-                        running_mode=mp_vision.RunningMode.VIDEO,
-                        num_hands=2,
-                        min_hand_detection_confidence=0.5,
-                    ))
-                self.gui.set_module_status("hands", "OK")
-            except Exception as exc:
-                self.hands = False
-                self.gui.set_module_status("hands", f"ERREUR : {exc}")
-        return self.hands or None
-
-    # ---- features ----
-
-    def run_nsfw(self, frame, now):
-        if now - self.last_nsfw < NSFW_INTERVAL:
+    def step(self, frame, now):
+        if not self.active or now - self.last < NSFW_INTERVAL:
             return
-        self.last_nsfw = now
-        if not NSFW_OK:
-            return
-        # opennsfw2 attend un chemin de fichier, pas un tableau numpy
-        tmp_path = os.path.join(TMP_DIR, "magnificat_frame.jpg")
-        cv2.imwrite(tmp_path, frame)
+        self.last = now
         try:
-            self.nsfw_score = float(opennsfw2.predict_image(tmp_path))
-            self.nsfw_error = None
-            self.gui.set_module_status("nsfw", "OK")
+            cv2.imwrite(NSFW_TMP, frame)
+            self.score = float(opennsfw2.predict_image(NSFW_TMP))
+            self.error = None
         except Exception as exc:
-            self.nsfw_error = str(exc)
-            self.nsfw_score = 0.0
-            self.gui.set_module_status("nsfw", f"ERREUR : {exc}")
+            self.error = str(exc)
+            self.score = 0.0
 
-    def run_yolo(self, frame, now):
-        if now - self.last_yolo < YOLO_INTERVAL:
+    def draw(self, frame):
+        if not self.active:
+            draw_text_bg(frame, "OPENNSFW ABSENT (pip install opennsfw2)", (10, 30), 0.5, (150, 150, 150), 1)
             return
-        self.last_yolo = now
-        model = self.get_yolo()
-        if model is None:
-            return
-        thresh = max(0.02, 0.5 * (1.0 - self.bias))
-        try:
-            res = model.predict(frame, conf=thresh, verbose=False)[0]
-            self.yolo_dets = []
-            for b in res.boxes:
-                cls = res.names[int(b.cls)]
-                conf = float(b.conf) * (1.0 + 0.6 * self.bias)  # le biais gonfle la certitude
-                x1, y1, x2, y2 = [int(v) for v in b.xyxy[0]]
-                self.yolo_dets.append((cls, min(conf, 1.0), (x1, y1, x2 - x1, y2 - y1)))
-        except Exception as exc:
-            self.gui.set_module_status("yolo", f"ERREUR : {exc}")
-
-    def run_hands(self, frame, now):
-        hands = self.get_hands()
-        if hands is None:
-            return False
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        ts = int(now * 1000)
-        res = hands.detect_for_video(mp_img, ts)
-        if not res.hand_landmarks:
-            return False
-        triggered = False
-        for hand, cat in zip(res.hand_landmarks, res.handedness):
-            # Vue selfie (miroir) : la main gauche du comedien apparait comme "Right"
-            label = cat[0].category_name
-            wrist_y = hand[0].y
-            n = fingers_up_landmarks(hand)
-            if label == "Right" and n == 2 and wrist_y < 0.45 and now - self.last_hallelujah > HALLELUJAH_COOLDOWN:
-                self.last_hallelujah = now
-                triggered = True
-                if self.features["musique"]:
-                    play_hallelujah()
-                    self.milk += 5
-        return triggered
-
-    def draw_halo(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = CASCADE.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(70, 70))
-        for (x, y, w, h) in faces:
-            cx = x + w // 2
-            cy = y - int(0.18 * h)
-            r = max(24, w // 2)
-            overlay = frame.copy()
-            cv2.ellipse(overlay, (cx, cy), (r, int(r * 0.38)), 0, 0, 360, GOLD, 3)
-            cv2.ellipse(overlay, (cx, cy), (r + 6, int(r * 0.45)), 0, 0, 360, (10, 120, 170), 1)
-            cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
-            text_y = max(18, cy - int(r * 0.5) - 6)
-            draw_text_bg(frame, "SANCTA", (max(4, cx - r), text_y), 0.5, GOLD, 1)
-
-    def draw_yolo(self, frame):
-        for cls, conf, (x, y, w, h) in self.yolo_dets:
-            if cls == "cow":
-                color = (200, 150, 255)
-                txt = f"VACHE {conf:.0%}"
-            elif cls == "udder":
-                color = (255, 220, 240)
-                txt = f"PIS {conf:.0%}"
-                if self.features["jauge"]:
-                    self.milk += 0.02
-            elif cls == "baby bottle" and self.features["biberon"]:
-                color = (60, 215, 245)
-                txt = f"RELIQUE {conf:.0%}"
-            else:
-                continue
-            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-            draw_text_bg(frame, txt, (x, y - 8), 0.5, color, 1)
-
-    def draw_nsfw(self, frame):
-        if not NSFW_OK:
-            draw_text_bg(frame, "INDICE DE LUBRICITE : MODULE ABSENT (pip install opennsfw2)",
-                         (10, 30), 0.55, (150, 150, 150), 1)
-            return
-        s = self.nsfw_score
+        s = self.score
         color = GOLD if s < 0.2 else (0, 165, 255) if s < 0.5 else (0, 0, 255)
         draw_text_bg(frame, f"INDICE DE LUBRICITE : {s:.1%}", (10, 30), 0.6, color, 2)
         bar_w = int(300 * min(1.0, s))
         cv2.rectangle(frame, (10, 40), (310, 52), (40, 40, 40), -1)
         cv2.rectangle(frame, (10, 40), (10 + bar_w, 52), color, -1)
+        if self.error:
+            draw_text_bg(frame, self.error[:60], (10, 70), 0.4, (0, 0, 255), 1)
 
-    def draw_milk(self, frame):
-        self.milk = max(0.0, min(100.0, self.milk - 0.01))
+
+class YoloModule:
+    """Vaches, pis, biberon-relique + biais inquisitorial."""
+
+    def __init__(self, gui):
+        self.model = None
+        self.dets = []
+        self.last = 0.0
+        self.error = None
+        self.active = YOLO_OK
+        self.gui = gui
+
+    def load(self):
+        if self.model is None:
+            self.gui.status("yolo", "CHARGEMENT...")
+            try:
+                m = YOLOWorld("yolov8s-worldv2")
+                m.set_classes(["cow", "udder", "baby bottle"])
+                self.model = m
+                self.gui.status("yolo", "OK")
+            except Exception as exc:
+                self.model = False
+                self.error = str(exc)
+                self.gui.status("yolo", f"ERREUR : {exc}")
+
+    def step(self, frame, now, bias):
+        if not self.active:
+            return
+        self.load()
+        if self.model is None or self.model is False:
+            return
+        if now - self.last < YOLO_INTERVAL:
+            return
+        self.last = now
+        try:
+            thresh = max(0.02, 0.5 * (1.0 - bias))
+            res = self.model.predict(frame, conf=thresh, verbose=False)[0]
+            dets = []
+            for b in res.boxes:
+                cls = res.names[int(b.cls)]
+                conf = float(b.conf) * (1.0 + 0.6 * bias)
+                x1, y1, x2, y2 = [int(v) for v in b.xyxy[0]]
+                dets.append((cls, min(conf, 1.0), (x1, y1, x2 - x1, y2 - y1)))
+            self.dets = dets
+            self.error = None
+        except Exception as exc:
+            self.error = str(exc)
+            self.gui.status("yolo", f"ERREUR : {exc}")
+
+    def draw(self, frame, show_relique, milk):
+        for cls, conf, (x, y, w, h) in self.dets:
+            if cls == "cow":
+                color, txt = (200, 150, 255), f"VACHE {conf:.0%}"
+            elif cls == "udder":
+                color, txt = (255, 220, 240), f"PIS {conf:.0%}"
+            elif cls == "baby bottle" and show_relique:
+                color, txt = (60, 215, 245), f"RELIQUE {conf:.0%}"
+            else:
+                continue
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+            draw_text_bg(frame, txt, (x, max(20, y - 8)), 0.5, color, 1)
+
+
+class HandsModule:
+    """Hallelujia : main gauche levee, 2 doigts (API solutions, vue miroir)."""
+
+    def __init__(self, gui):
+        self.detector = None
+        self.last_hallelujah = 0.0
+        self.error = None
+        self.active = MP_OK
+        self.gui = gui
+
+    def load(self):
+        if self.detector is None and self.active:
+            try:
+                self.detector = mp.solutions.hands.Hands(
+                    max_num_hands=2, min_detection_confidence=0.6)
+                self.gui.status("hands", "OK")
+            except Exception as exc:
+                self.detector = False
+                self.error = str(exc)
+                self.gui.status("hands", f"ERREUR : {exc}")
+
+    def step(self, frame, now, on_hallelujah):
+        if not self.active:
+            return
+        self.load()
+        if not self.detector:
+            return
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            res = self.detector.process(rgb)
+            if not res.multi_hand_landmarks:
+                return
+            for hand, handed in zip(res.multi_hand_landmarks, res.multi_handedness):
+                label = handed.classification[0].label
+                wrist_y = hand.landmark[0].y
+                if label == "Right" and fingers_up(hand) == 2 and wrist_y < 0.45 \
+                        and now - self.last_hallelujah > HALLELUJAH_COOLDOWN:
+                    self.last_hallelujah = now
+                    on_hallelujah()
+                    return
+        except Exception as exc:
+            self.error = str(exc)
+            self.gui.status("hands", f"ERREUR : {exc}")
+
+
+class HaloModule:
+    """Halo SANCTA autour des tetes (Haar cascade, aucune dependance)."""
+
+    @staticmethod
+    def draw(frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = CASCADE.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(70, 70))
+        for (x, y, w, h) in faces:
+            cx = x + w // 2
+            cy = max(14, y - int(0.18 * h))
+            r = max(24, w // 2)
+            cv2.ellipse(frame, (cx, cy), (r, int(r * 0.38)), 0, 0, 360, GOLD, 3)
+            cv2.ellipse(frame, (cx, cy), (r + 6, int(r * 0.45)), 0, 0, 360, (10, 120, 170), 1)
+            draw_text_bg(frame, "SANCTA", (max(4, cx - r), max(16, cy - r // 2 - 6)), 0.5, GOLD, 1)
+
+
+class MilkModule:
+    """Jauge lactee : +5 par hallelujia, croit a la vue d'un pis, s'evapore."""
+
+    def __init__(self):
+        self.level = 0.0
+
+    def add(self, amount):
+        self.level = min(100.0, self.level + amount)
+
+    def step(self, yolo_dets):
+        if any(cls == "udder" for cls, _, _ in yolo_dets):
+            self.level = min(100.0, self.level + 0.02)
+
+    def draw(self, frame):
+        self.level = max(0.0, self.level - 0.01)
         h, w = frame.shape[:2]
         x0, y0, x1, y1 = w - 90, h - 220, w - 40, h - 40
         cv2.rectangle(frame, (x0 - 3, y0 - 3), (x1 + 3, y1 + 3), GOLD, 2)
-        fill = int((y1 - y0) * self.milk / 100.0)
+        fill = int((y1 - y0) * self.level / 100.0)
         cv2.rectangle(frame, (x0, y1 - fill), (x1, y1), (235, 250, 255), -1)
         for i in range(1, 4):
             yy = y0 + (y1 - y0) * i // 4
             cv2.line(frame, (x0, yy), (x0 + 10, yy), GOLD, 1)
-        draw_text_bg(frame, f"LAIT {self.milk:.0f}%", (x0 - 5, y0 - 14), 0.5, GOLD, 1)
+        draw_text_bg(frame, f"LAIT {self.level:.0f}%", (x0 - 5, y0 - 14), 0.5, GOLD, 1)
 
-    def draw_baroque_frame(self, frame):
-        h, w = frame.shape[:2]
-        cv2.rectangle(frame, (0, 0), (w, 34), (20, 12, 60), -1)
-        cv2.rectangle(frame, (0, 0), (w, 34), GOLD, 1)
-        draw_text_bg(frame, "\u271d MAGNIFICAT \u271d  SANCTUAIRE DE SURVEILLANCE LACTEE  \u271d",
-                     (w // 2 - 300, 24), 0.55, GOLD, 1, bg=(20, 12, 60))
-        cv2.rectangle(frame, (0, h - 3), (w, h), GOLD, 2)
 
-    # ---- boucle ----
+# ------------------ application ------------------
+
+class App:
+    def __init__(self):
+        self.cap = cv2.VideoCapture(0)
+        cv2.namedWindow("MAGNIFICAT", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("MAGNIFICAT", 960, 540)
+        self.features = {"nsfw": True, "vaches": True, "musique": True,
+                         "biberon": True, "halo": True, "jauge": True}
+        self.bias = 0.0
+        self.running = False
+        self.gui = Gui(self)
+        self.nsfw = NsfwModule()
+        self.yolo = YoloModule(self.gui)
+        self.hands = HandsModule(self.gui)
+        self.milk = MilkModule()
 
     def tick(self):
         ret, frame = self.cap.read()
@@ -310,19 +313,26 @@ class App:
             self.quit()
             return
         if self.features["nsfw"]:
-            self.run_nsfw(frame, now)
-            self.draw_nsfw(frame)
+            self.nsfw.step(frame, now)
+            self.nsfw.draw(frame)
         if self.features["vaches"] or self.features["biberon"]:
-            self.run_yolo(frame, now)
-            self.draw_yolo(frame)
-        if self.features["musique"] and MP_OK:
-            self.run_hands(frame, now)
+            self.yolo.step(frame, now, self.bias)
+            self.yolo.draw(frame, self.features["biberon"], self.milk)
+        if self.features["musique"]:
+            self.hands.step(frame, now, lambda: (play_hallelujah(), self.milk.add(5)))
         if self.features["halo"]:
-            self.draw_halo(frame)
+            HaloModule.draw(frame)
         if self.features["jauge"]:
-            self.draw_milk(frame)
-        self.draw_baroque_frame(frame)
-        cv2.imshow(self.window, frame)
+            self.milk.step(self.yolo.dets)
+            self.milk.draw(frame)
+        # cadre baroque
+        h, w = frame.shape[:2]
+        cv2.rectangle(frame, (0, 0), (w, 34), (20, 12, 60), -1)
+        cv2.rectangle(frame, (0, 0), (w, 34), GOLD, 1)
+        draw_text_bg(frame, "+ MAGNIFICAT +  SANCTUAIRE DE SURVEILLANCE LACTEE  +",
+                     (w // 2 - 285, 24), 0.55, GOLD, 1, bg=(20, 12, 60))
+        cv2.rectangle(frame, (0, h - 3), (w, h), GOLD, 2)
+        cv2.imshow("MAGNIFICAT", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             self.quit()
             return
@@ -346,85 +356,82 @@ class App:
 
 
 class Gui:
-    """Pupitre baroque : un interrupteur par miracle."""
+    """Sacristie : interrupteurs des miracles, etat des modules, slider de biais."""
 
     def __init__(self, app):
         self.app = app
         self.root = tk.Tk()
         self.root.title("MAGNIFICAT - Sacristie de Controle")
-        self.root.geometry("460x620")
-        self.root.configure(bg="#1a0a2e")
-        self.root.protocol("WM_DELETE_WINDOW", app.quit)
+        self.root.geometry("460x640")
         BG = "#1a0a2e"
+        self.root.configure(bg=BG)
+        self.root.protocol("WM_DELETE_WINDOW", app.quit)
 
         for col in ("#d4af37", "#5c0a1e", "#d4af37"):
             tk.Label(self.root, bg=col, height=1).pack(fill=tk.X)
-        tk.Label(self.root, text="\u271d  M A G N I F I C A T  \u271d", bg=BG, fg="#d4af37",
+        tk.Label(self.root, text="+  M A G N I F I C A T  +", bg=BG, fg="#d4af37",
                  font=("Times", 17, "bold")).pack(pady=(5, 0))
         tk.Label(self.root, text="OFFICE DE SURVEILLANCE - ARCHIDIOCESE TECHNOLOGIQUE",
                  bg=BG, fg="#c09090", font=("Times", 9)).pack()
 
-        self.module_status = {
-            "nsfw": "OK" if NSFW_OK else "absent (pip install opennsfw2)",
-            "yolo": "OK" if YOLO_OK else "absent (pip install ultralytics)",
-            "hands": "OK" if MP_OK else "version incompatible (pip install mediapipe==0.10.14)",
-            "audio": "OK" if PYGAME_OK else "absent (bip systeme)",
+        etats = {
+            "OpenNSFW  ": "OK" if NSFW_OK else "absent (pip install opennsfw2)",
+            "YOLO-World": "OK" if YOLO_OK else "absent (pip install ultralytics)",
+            "MediaPipe ": "OK" if MP_OK else "API incompatible (pip install mediapipe==0.10.14)",
+            "Audio     ": "OK" if PYGAME_OK else "absent (bip systeme)",
         }
-        self.status_frame = tk.Frame(self.root, bg="#12041f", relief="sunken")
-        self.status_frame.pack(fill=tk.X, padx=10, pady=6)
         self.status_labels = {}
-        for key, txt in self.module_status.items():
-            name = {"nsfw": "OpenNSFW", "yolo": "YOLO-World", "hands": "MediaPipe", "audio": "Audio"}[key]
-            lbl = tk.Label(self.status_frame, text=f"{name:<11}: {txt}", bg="#12041f",
-                           fg="#00ff9d" if txt == "OK" else "#e8a0a0",
-                           font=("Courier", 8), anchor="w", justify=tk.LEFT, wraplength=420)
+        frame = tk.Frame(self.root, bg="#12041f", relief="sunken")
+        frame.pack(fill=tk.X, padx=10, pady=6)
+        for name, etat in etats.items():
+            key = {"OpenNSFW  ": "nsfw", "YOLO-World": "yolo",
+                   "MediaPipe ": "hands", "Audio     ": "audio"}[name]
+            lbl = tk.Label(frame, text=f"{name}: {etat}", bg="#12041f",
+                           fg="#00ff9d" if etat == "OK" else "#e8a0a0",
+                           font=("Courier", 8), anchor="w", wraplength=420, justify=tk.LEFT)
             lbl.pack(fill=tk.X, padx=6, pady=1)
             self.status_labels[key] = lbl
 
         tk.Label(self.root, text="MIRACLES ACTIVABLES :", bg=BG, fg="#d4af37",
                  font=("Times", 11, "bold")).pack(anchor="w", padx=12)
-
         self.vars = {}
-        labels = [
+        for key, label in [
             ("nsfw", "Indice de lubricite (OpenNSFW)"),
             ("vaches", "Vaches et pis sacres (YOLO)"),
             ("musique", "Hallelujia - main gauche, 2 doigts"),
             ("biberon", "Relique (biberon)"),
-            ("halo", "Halo de saintete"),
+            ("halo", "Halo SANCTA"),
             ("jauge", "Jauge lactee"),
-        ]
-        for key, label in labels:
+        ]:
             var = tk.BooleanVar(value=app.features[key])
             self.vars[key] = var
             tk.Checkbutton(self.root, text=label, variable=var, bg=BG, fg="#f0e6d0",
                            activebackground="#2a0a3e", activeforeground="#d4af37",
                            selectcolor="#12041f", font=("Times", 11),
-                           command=lambda k=key: self.toggle(k)).pack(anchor="w", padx=24, pady=1)
+                           command=lambda k=key: self._toggle(k, self.app)).pack(anchor="w", padx=24, pady=1)
 
         tk.Label(self.root, text="BIAIS INQUISITORIAL DU MODELE VACHES :",
                  bg=BG, fg="#d4af37", font=("Times", 10, "bold")).pack(anchor="w", padx=12, pady=(8, 0))
         self.bias_var = tk.DoubleVar(value=0.0)
-        self.bias_scale = tk.Scale(
-            self.root, variable=self.bias_var, from_=0, to=100, orient=tk.HORIZONTAL,
-            bg=BG, fg="#d4af37", troughcolor="#12041f", highlightthickness=0,
-            font=("Times", 9), length=380,
-            command=lambda v: setattr(app, "bias", float(v) / 100.0))
-        self.bias_scale.pack(padx=16)
+        tk.Scale(self.root, variable=self.bias_var, from_=0, to=100, orient=tk.HORIZONTAL,
+                 bg=BG, fg="#d4af37", troughcolor="#12041f", highlightthickness=0,
+                 font=("Times", 9), length=380,
+                 command=lambda v: setattr(app, "bias", float(v) / 100.0)).pack(padx=16)
         tk.Label(self.root, text="0 : le modele ne voit que la verite.\n"
                                  "100 : le modele voit des vaches partout (foi renforcee).",
                  bg=BG, fg="#c09090", font=("Times", 8)).pack()
-
         tk.Label(self.root, text="GLOIRE AU LAIT ETERNEL - (C) 2028 ARCHIDIOCESE",
                  bg=BG, fg="#8a6a3a", font=("Times", 8)).pack(side=tk.BOTTOM, pady=6)
 
-    def toggle(self, key):
-        self.app.features[key] = self.vars[key].get()
+    def _toggle(self, key, app):
+        app.features[key] = self.vars[key].get()
 
-    def set_module_status(self, key, txt):
-        self.module_status[key] = txt
+    def status(self, key, txt):
         if key in self.status_labels:
+            name = {"nsfw": "OpenNSFW  ", "yolo": "YOLO-World", "hands": "MediaPipe ",
+                    "audio": "Audio     "}[key]
             self.status_labels[key].config(
-                text=f"{ {'nsfw': 'OpenNSFW', 'yolo': 'YOLO-World', 'hands': 'MediaPipe', 'audio': 'Audio'}[key]:<11}: {txt}",
+                text=f"{name}: {txt}",
                 fg="#00ff9d" if txt == "OK" else "#e8a0a0")
 
 
