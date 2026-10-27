@@ -32,7 +32,9 @@ except ImportError:
 
 try:
     import mediapipe as mp
-    MP_OK = True
+    MP_OK = hasattr(mp, "solutions") and hasattr(mp.solutions, "hands")
+    if not MP_OK:
+        mp = None  # nouvelle API tasks non supportee : downgrade conseille
 except ImportError:
     mp, MP_OK = None, False
 
@@ -340,7 +342,7 @@ class Gui:
         self.module_status = {
             "nsfw": "OK" if NSFW_OK else "absent (pip install opennsfw2)",
             "yolo": "OK" if YOLO_OK else "absent (pip install ultralytics)",
-            "hands": "OK" if MP_OK else "absent (pip install mediapipe)",
+            "hands": "OK" if MP_OK else "version incompatible (pip install mediapipe==0.10.14)",
             "audio": "OK" if PYGAME_OK else "absent (bip systeme)",
         }
         self.status_frame = tk.Frame(self.root, bg="#12041f", relief="sunken")
