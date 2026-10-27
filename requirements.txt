@@ -5,5 +5,5 @@ nudenet>=3.3.2
 # --- MAGNIFICAT (magnificat.py) ---
 opennsfw2>=0.1.0
 ultralytics>=8.2.0
-mediapipe==0.10.14
+mediapipe>=0.10.14
 pygame>=2.5.0

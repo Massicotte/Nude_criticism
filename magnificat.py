@@ -32,11 +32,24 @@ except ImportError:
 
 try:
     import mediapipe as mp
-    MP_OK = hasattr(mp, "solutions") and hasattr(mp.solutions, "hands")
-    if not MP_OK:
-        mp = None  # nouvelle API tasks non supportee : downgrade conseille
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision as mp_vision
+    MP_OK = True
 except ImportError:
     mp, MP_OK = None, False
+
+HAND_LANDMARKER_URL = ("https://storage.googleapis.com/mediapipe-models/"
+                       "hand_landmarker/hand_landmarker/float16/1/"
+                       "hand_landmarker.task")
+HAND_MODEL_PATH = os.path.join(TMP_DIR, "hand_landmarker.task")
+
+
+def ensure_hand_model():
+    """Telecharge le modele hand_landmarker (nouvelle API Tasks) si absent."""
+    import urllib.request
+    if not os.path.exists(HAND_MODEL_PATH):
+        urllib.request.urlretrieve(HAND_LANDMARKER_URL, HAND_MODEL_PATH)
+    return HAND_MODEL_PATH
 
 try:
     import pygame
@@ -90,13 +103,14 @@ def play_hallelujah():
     synth_hallelujah()
 
 
-def fingers_up(hand_landmarks):
-    """Nombre de doigts longs tendus (index, majeur, annulaire, auriculaire)."""
+def fingers_up_landmarks(landmarks):
+    """Nombre de doigts longs tendus (index, majeur, annulaire, auriculaire).
+    landmarks : liste de NormalizedLandmark (nouvelle API Tasks)."""
     tips = [8, 12, 16, 20]
     pips = [6, 10, 14, 18]
     count = 0
     for tip, pip in zip(tips, pips):
-        if hand_landmarks.landmark[tip].y < hand_landmarks.landmark[pip].y - 0.03:
+        if landmarks[tip].y < landmarks[pip].y - 0.03:
             count += 1
     return count
 
@@ -142,9 +156,17 @@ class App:
 
     def get_hands(self):
         if self.hands is None and MP_OK:
+            self.gui.set_module_status("hands", "CHARGEMENT du modele...")
             try:
-                self.hands = mp.solutions.hands.Hands(
-                    max_num_hands=2, min_detection_confidence=0.6)
+                model_path = ensure_hand_model()
+                opts = mp_python.BaseOptions(model_asset_path=model_path)
+                self.hands = mp_vision.HandLandmarker.create_from_options(
+                    mp_vision.HandLandmarkerOptions(
+                        base_options=opts,
+                        running_mode=mp_vision.RunningMode.VIDEO,
+                        num_hands=2,
+                        min_hand_detection_confidence=0.5,
+                    ))
                 self.gui.set_module_status("hands", "OK")
             except Exception as exc:
                 self.hands = False
@@ -195,15 +217,17 @@ class App:
         if hands is None:
             return False
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = hands.process(rgb)
-        if not res.multi_hand_landmarks:
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        ts = int(now * 1000)
+        res = hands.detect_for_video(mp_img, ts)
+        if not res.hand_landmarks:
             return False
         triggered = False
-        for hand, handed in zip(res.multi_hand_landmarks, res.multi_handedness):
+        for hand, cat in zip(res.hand_landmarks, res.handedness):
             # Vue selfie (miroir) : la main gauche du comedien apparait comme "Right"
-            label = handed.classification[0].label
-            wrist_y = hand.landmark[0].y
-            n = fingers_up(hand)
+            label = cat[0].category_name
+            wrist_y = hand[0].y
+            n = fingers_up_landmarks(hand)
             if label == "Right" and n == 2 and wrist_y < 0.45 and now - self.last_hallelujah > HALLELUJAH_COOLDOWN:
                 self.last_hallelujah = now
                 triggered = True
