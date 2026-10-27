@@ -204,7 +204,7 @@ class App:
             cv2.ellipse(overlay, (cx, cy), (r, int(r * 0.38)), 0, 0, 360, GOLD, 3)
             cv2.ellipse(overlay, (cx, cy), (r + 6, int(r * 0.45)), 0, 0, 360, (10, 120, 170), 1)
             cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
-            draw_text_bg(frame, "SANCTUS", (cx - r, cy - int(r * 0.5) - 6), 0.5, GOLD, 1)
+            draw_text_bg(frame, "SANCTA", (cx - r, cy - int(r * 0.5) - 6), 0.5, GOLD, 1)
 
     def draw_yolo(self, frame):
         for cls, conf, (x, y, w, h) in self.yolo_dets:
